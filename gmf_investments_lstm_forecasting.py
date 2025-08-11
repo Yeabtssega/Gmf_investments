@@ -1,89 +1,89 @@
-import yfinance as yf
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import yfinance as yf
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense
-from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+import math
 
 # Parameters
-ASSET = 'TSLA'
-START_DATE = '2015-01-01'
-END_DATE = '2025-01-01'  # adjust if you want
-SEQ_LENGTH = 60  # days to look back for prediction
-EPOCHS = 20
-BATCH_SIZE = 32
+ASSET = "TSLA"
+START_DATE = "2015-01-01"
+END_DATE = "2025-01-01"
+LOOKBACK = 60  # days for sequence length
 
-print("Fetching Tesla stock data from Yahoo Finance...")
-df = yf.download(ASSET, start=START_DATE, end=END_DATE)  # auto_adjust=True default
+# Step 1: Download Tesla stock data
+print(f"Fetching {ASSET} stock data from Yahoo Finance...")
+df = yf.download(ASSET, start=START_DATE, end=END_DATE)
 print(f"Data downloaded: {len(df)} rows")
 
-# Use 'Close' price
-tsla_series = df['Close'].fillna(method='ffill')
+# Fix: use 'Close' instead of 'Adj Close'
+df = df[['Close']].dropna()
+df = df.rename(columns={'Close': 'Price'})
 
-# Split chronologically: train/test split by date
-split_date = '2023-01-01'
-train = tsla_series.loc[:split_date]
-test = tsla_series.loc[split_date:]
+# Step 2: Train/test split
+train_size = int(len(df) * 0.9)
+train, test = df.iloc[:train_size], df.iloc[train_size:]
 
 print(f"Train size: {len(train)}, Test size: {len(test)}")
 
-# Scale data
+# Step 3: Scale data
 scaler = MinMaxScaler(feature_range=(0, 1))
-train_scaled = scaler.fit_transform(train.values.reshape(-1, 1))
-test_scaled = scaler.transform(test.values.reshape(-1, 1))
+train_scaled = scaler.fit_transform(train)
+test_scaled = scaler.transform(test)
 
-# Prepare sequences for LSTM
-def create_sequences(data, seq_length):
-    xs, ys = [], []
-    for i in range(len(data) - seq_length):
-        x = data[i:i + seq_length]
-        y = data[i + seq_length]
-        xs.append(x)
-        ys.append(y)
-    return np.array(xs), np.array(ys)
+# Step 4: Create sequences
+def create_sequences(data, lookback):
+    X, y = [], []
+    for i in range(lookback, len(data)):
+        X.append(data[i - lookback:i, 0])
+        y.append(data[i, 0])
+    return np.array(X), np.array(y)
 
-X_train, y_train = create_sequences(train_scaled, SEQ_LENGTH)
-X_test, y_test = create_sequences(test_scaled, SEQ_LENGTH)
+X_train, y_train = create_sequences(train_scaled, LOOKBACK)
+X_test, y_test = create_sequences(test_scaled, LOOKBACK)
 
-print(f"X_train shape: {X_train.shape}, y_train shape: {y_train.shape}")
-print(f"X_test shape: {X_test.shape}, y_test shape: {y_test.shape}")
+# Reshape for LSTM [samples, time steps, features]
+X_train = np.reshape(X_train, (X_train.shape[0], X_train.shape[1], 1))
+X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1], 1))
 
-# Build LSTM model
-model = Sequential([
-    LSTM(50, return_sequences=True, input_shape=(SEQ_LENGTH, 1)),
-    LSTM(50),
-    Dense(1)
-])
+# Step 5: Build LSTM model
+model = Sequential()
+model.add(LSTM(units=50, return_sequences=True, input_shape=(X_train.shape[1], 1)))
+model.add(Dropout(0.2))
+model.add(LSTM(units=50, return_sequences=False))
+model.add(Dropout(0.2))
+model.add(Dense(units=1))  # Prediction of the next price
 
-model.compile(optimizer='adam', loss='mse')
+model.compile(optimizer='adam', loss='mean_squared_error')
 
-# Early stopping to avoid overfitting
-early_stop = EarlyStopping(monitor='loss', patience=3)
+# Step 6: Train the model
+model.fit(X_train, y_train, epochs=20, batch_size=32, verbose=2)
 
-print("Training LSTM model...")
-model.fit(X_train, y_train, epochs=EPOCHS, batch_size=BATCH_SIZE, callbacks=[early_stop], verbose=2)
+# Step 7: Make predictions
+predicted_prices = model.predict(X_test)
+predicted_prices = scaler.inverse_transform(predicted_prices)
 
-# Predict on test set
-y_pred_scaled = model.predict(X_test)
+# Step 8: Evaluate
+actual_prices = test[LOOKBACK:].values
 
-# Inverse transform to get original scale
-y_test_orig = scaler.inverse_transform(y_test)
-y_pred_orig = scaler.inverse_transform(y_pred_scaled)
-
-# Define safe MAPE (avoid division by zero)
-def safe_mape(y_true, y_pred):
-    y_true, y_pred = np.array(y_true).flatten(), np.array(y_pred).flatten()
-    mask = y_true != 0
-    return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100
-
-# Evaluate
-mae = mean_absolute_error(y_test_orig, y_pred_orig)
-rmse = np.sqrt(mean_squared_error(y_test_orig, y_pred_orig))
-mape = safe_mape(y_test_orig, y_pred_orig)
+mae = mean_absolute_error(actual_prices, predicted_prices)
+rmse = math.sqrt(mean_squared_error(actual_prices, predicted_prices))
+mape = np.mean(np.abs((actual_prices - predicted_prices) / actual_prices)) * 100
 
 print("\nLSTM Forecast Evaluation:")
 print(f"MAE = {mae:.4f}")
 print(f"RMSE = {rmse:.4f}")
 print(f"MAPE = {mape:.2f}%")
+
+# Step 9: Plot results
+plt.figure(figsize=(12, 6))
+plt.plot(df.index[train_size+LOOKBACK:], actual_prices, color='blue', label='Actual Price')
+plt.plot(df.index[train_size+LOOKBACK:], predicted_prices, color='red', label='Predicted Price')
+plt.title(f'{ASSET} Stock Price Prediction')
+plt.xlabel('Date')
+plt.ylabel('Price USD')
+plt.legend()
+plt.show()
